@@ -44,11 +44,16 @@ class GujaratSamacharScraper:
             if src.lower().endswith((".jpg", ".jpeg", ".png")):
                 yield src if src.startswith("http") else self.BASE + src
 
-    def scrape_page(self, date, pg, sess, progress_bar=None):
+    def scrape_page(self, date, pg, sess, status_container, stats):
         images = []
         try:
             artid, html_text = self.first_article_id(date, pg, sess)
             consecutive_misses = 0
+            articles_searched = 0
+
+            # Update starting article ID
+            stats['current_article_id'] = artid
+
             while consecutive_misses < 100:
                 url = self.article_url(date, pg, artid)
                 try:
@@ -58,20 +63,36 @@ class GujaratSamacharScraper:
                         # Download image
                         img_response = self.fetch(imurl, sess)
                         if img_response.status_code == 200:
-                            # Create filename with convention: date_pagenumber_articlenumber.jpeg
                             filename = f"{date}_{pg}_{artid}.jpeg"
                             images.append((filename, img_response.content))
-                            if progress_bar:
-                                progress_bar.progress((artid % 100) / 100)
+                            stats['total_images'] += 1
+
+                            # Update status
+                            status_container.text(
+                                f"📄 Page: {pg}\n"
+                                f"🔍 Current Article ID: {artid}\n"
+                                f"📊 Articles Searched: {articles_searched}\n"
+                                f"🎯 Images Found: {stats['total_images']}\n"
+                                f"❌ Consecutive Misses: {consecutive_misses}"
+                            )
+
                 except requests.HTTPError as e:
                     if e.response.status_code == 404:
                         consecutive_misses += 1
                     else:
                         raise
+
                 artid += 1
+                articles_searched += 1
+                stats['total_articles_searched'] += 1
                 time.sleep(0.6)
+
+            # Page completed successfully
+            stats['pages_completed'] += 1
+
         except Exception as e:
             st.error(f"Error scraping page {pg}: {str(e)}")
+            stats['failed_pages'].append(pg)
 
         return images
 
@@ -86,7 +107,7 @@ def main():
     st.title("Gujarat Samachar E-Paper Scraper")
 
     # Date selector
-    min_date = datetime.date.today() - timedelta(days=30)  # Allow selecting up to 30 days back
+    min_date = datetime.date.today() - timedelta(days=30)
     max_date = datetime.date.today()
     selected_date = st.date_input(
         "Select Date",
@@ -101,23 +122,62 @@ def main():
         scraper = GujaratSamacharScraper()
         all_images = []
 
-        with st.spinner("Scraping images... This may take a few minutes."):
-            progress_bar = st.progress(0)
+        # Create containers for live updates
+        status_container = st.empty()
+        summary_container = st.empty()
+        final_stats_container = st.empty()
 
+        # Initialize statistics
+        stats = {
+            'total_images': 0,
+            'total_articles_searched': 0,
+            'pages_completed': 0,
+            'failed_pages': [],
+            'current_article_id': 0
+        }
+
+        with st.spinner("Scraping images... This may take a few minutes."):
             with requests.Session() as sess:
                 sess.headers.update(scraper.HEADERS)
                 page = 1
+
+                # Create two columns for statistics
+                col1, col2 = st.columns(2)
+
                 while page <= 30:  # Limit to 30 pages for safety
                     try:
-                        st.write(f"Scanning page {page}...")
-                        images = scraper.scrape_page(formatted_date, page, sess, progress_bar)
+                        # Update summary stats in the second column
+                        with col2:
+                            summary_container.text(
+                                "📊 Summary Statistics\n"
+                                f"Pages Completed: {stats['pages_completed']}\n"
+                                f"Total Articles Searched: {stats['total_articles_searched']}\n"
+                                f"Total Images Found: {stats['total_images']}\n"
+                                f"Failed Pages: {', '.join(map(str, stats['failed_pages'])) or 'None'}"
+                            )
+
+                        # Show current page status in the first column
+                        with col1:
+                            images = scraper.scrape_page(formatted_date, page, sess, status_container, stats)
+
                         if not images:  # If no images found, assume we've reached the end
                             break
                         all_images.extend(images)
                         page += 1
+
                     except Exception as e:
                         st.error(f"Error on page {page}: {str(e)}")
+                        stats['failed_pages'].append(page)
                         break
+
+        # Display final statistics
+        final_stats_container.success(
+            "🎉 Scraping Completed!\n\n"
+            f"📚 Total Pages Processed: {stats['pages_completed']}\n"
+            f"🔍 Total Articles Searched: {stats['total_articles_searched']}\n"
+            f"📸 Total Images Downloaded: {stats['total_images']}\n"
+            f"❌ Failed Pages: {', '.join(map(str, stats['failed_pages'])) or 'None'}"
+        )
 
         if all_images:
             # Create zip file
@@ -125,13 +185,11 @@ def main():
 
             # Offer download
             st.download_button(
-                label="Download ZIP file",
+                label="📥 Download ZIP file",
                 data=zip_buffer.getvalue(),
                 file_name=f"gujarat_samachar_{formatted_date}.zip",
                 mime="application/zip"
             )
-
-            st.success(f"Successfully scraped {len(all_images)} images!")
         else:
             st.warning("No images found for the selected date.")
 
